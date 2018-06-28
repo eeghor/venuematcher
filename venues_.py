@@ -140,14 +140,11 @@ class VenueMatcher:
 
 	BAD_TYPES = set('political colloquial_area locality natural_feature'.split())
 	
-	# words to catch useless venues
-	BAD_WORDS = set("""games ticketek voucher circus cruise cirque bus events  
-						buses cruises prosessing balloon series coach tent trail upsell 
-						station fence pier reserve office memberships miscelaneous festival interchange""".split())
-
-	
 	# sometimes we'd like to pick the search resuts of a particular type only
 	ENFORCED_TYPES = {'winery': 'food', 'vineyard': 'food', 'zoo': 'zoo'}
+
+	GOOGLE_REQUESTS = 0
+	MAX_GOOGLE_REQUESTS = 1000
 	
 	gmaps = googlemaps.Client(**json.load(open('credentials/google.json')))
 	
@@ -156,7 +153,7 @@ class VenueMatcher:
 		# check the backlog first
 		print('checking the backlog...')
 
-		if os.path.exists('data/backlog.csv'):
+		if os.path.exists(VenueMatcher.BACKLOG):
 
 			self.BACKLOG = pd.read_csv(VenueMatcher.BACKLOG)
 			print(f'found {len(self.BACKLOG)} venues..')
@@ -168,7 +165,6 @@ class VenueMatcher:
 
 		self.PROCESSED_VENUES = [vcode.strip() for vcode in open(VenueMatcher.VENUECODE_NOTEPAD) if vcode.strip()]
 		print(f'venue codes processed so far: {len(self.PROCESSED_VENUES)}')
-
 
 		if (venue_file is not None) and (venue_df is None):
 			self.venue_df = pd.read_csv(venue_file)
@@ -370,7 +366,7 @@ class VenueMatcher:
 		st = ''.join([l for l in st if str(l).isalnum() or str(l).isspace()])
 		st = re.sub(r'\s{2,}', ' ', st)
 		
-		return st
+		return st.strip()
 	
 	def _get_fields(self, res):
 		"""
@@ -410,8 +406,10 @@ class VenueMatcher:
 					# so we have a specific state..
 					try:
 						qr_ = self.gmaps.geocode(' '.join([v['name'], VenueMatcher.STATES[v['state']], 'australia']))
+						VenueMatcher.GOOGLE_REQUESTS += 1
+						print(f'requests: {VenueMatcher.GOOGLE_REQUESTS}')
 					except:
-						print(f'no response, probably exceeded quota')
+						print(f'no response! probably exceeded quota?')
 						json.dump(self.tkt_venues, open('data/tkt_venues.json','w'))
 						break
 				
@@ -426,6 +424,8 @@ class VenueMatcher:
 						
 						try:
 							qr_ = self.gmaps.geocode(' '.join([v['name'], VenueMatcher.STATES[possible_state], 'australia']))
+							VenueMatcher.GOOGLE_REQUESTS += 1
+							print(f'requests: {VenueMatcher.GOOGLE_REQUESTS}')
 						except:
 							print(f'no response, probably EXCEEDED GOOGLE API QUOTA?')
 							json.dump(vm.tkt_venues, open('data/tkt_venuesx.json','w'))
@@ -436,6 +436,7 @@ class VenueMatcher:
 							q_top_result = None
 							
 							for r in qr_:
+
 								if VenueMatcher.BAD_TYPES & set(r.get('types',[])):
 									continue
 								else:
@@ -452,12 +453,17 @@ class VenueMatcher:
 										v.update(self._get_fields(q_top_result))
 										
 										break
+
+									# if result has a wrong country
+									if ('country' in address_component['long_name']['types']) and (address_component['long_name'].lower() != 'australia'):
+
+										pass
 		
 		json.dump(self.tkt_venues, open('data/tkt_venuesx.json','w'))
 		
 		return self
 	
-	def get_place_details(self, local_file='data/tkt_venues.json'):
+	def get_place_details(self, local_file=None):
 		
 		"""
 		ask google maps for place details using a place id; 
@@ -480,6 +486,8 @@ class VenueMatcher:
 				
 				try:
 					place_details = self.gmaps.place(v['place_id'])['result']
+					VenueMatcher.GOOGLE_REQUESTS += 1
+					print(f'requests: {VenueMatcher.GOOGLE_REQUESTS}')
 				except:
 					print(f'can\'t get any place details for place_id {v["name"]}. EXCEEDED QUOTA?')
 					json.dump(self.tkt_venues, open('data/tkt_venues.json','w'))
