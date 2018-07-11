@@ -16,22 +16,65 @@ import googlemaps
 
 import pickle
 
-def save(df):
 
-	file_ = f'venues_{arrow.utcnow().to("Australia/Sydney").format("YYYYMMDD")}.csv'
-	df.to_csv(file_, sep='\t', index=False)
-
-	print(f'saved to file {file_}')
-
-class VenueTableGetter:
+class VenueMatcher:
 	
 	"""
 	class to connect to venue tables and get all useful data
-	"""
+	""" 
+
 	def __init__(self, **kwargs):
 
 		self.VENUE_BASE_TBL = 'DWSales.dbo.venue_dim'
 		self.VENUE_EXTRA_TBL = 'DWSales.dbo.VenuesPowerWebAddresses'
+
+		self.STRUCT = {'backlog': {'dir': 'backlog', 'file': 'backlog.json'},
+						'new_venues': {'dir': 'new_venues', 'file': 'new_venues.csv.gz'},
+						'old_venues': {'dir': 'old_venues', 'file': 'processed_venue_codes.txt'}} 
+
+		self.PREFERRED_STATES = 'nsw vic qld wa act sa tas nt'.split()
+	
+		self.STATES = {'nsw': 'new south wales', 
+						'act': 'australian capital territory', 
+						'vic': 'victoria',
+						'tas': 'tasmania',
+						'wa': 'western australia',
+						'nt': 'northern teritory',
+						'sa': 'south australia',
+						'qld': 'queensland'}
+		
+		# now another dictionary, full to abbreviated
+		self.STATES_ = {v: k for k, v in self.STATES.items()}
+		
+		self.SUBURBS = json.load(open('data/aus_suburbs_auspost_APR2017.json'))
+
+		self.BAD_TYPES = set('political colloquial_area locality natural_feature'.split())
+		
+		# sometimes we'd like to pick the search results of a particular type only
+		self.ENFORCED_TYPES = {'winery': 'food', 'vineyard': 'food', 'zoo': 'zoo'}
+
+		self.GOOGLE_REQUESTS = 0
+		self.MAX_GOOGLE_REQUESTS = 1000
+		
+		self.gmaps = googlemaps.Client(**json.load(open('credentials/google.json')))	
+
+		self.venues_lst = []
+
+	def check(self):
+
+		for what in self.STRUCT:
+
+			print(f'checking for {what}...')
+
+			if not os.path.exists(self.STRUCT[what]['dir']):
+				os.mkdir(self.STRUCT[what]['dir'])
+
+			if not os.path.exists(os.path.join(self.STRUCT[what]['dir'], self.STRUCT[what]['file'])):
+				print(f'no {what} found...')
+			else:
+				print(f'found some {what}...')
+
+		return self
 
 
 	def start_session(self, sqlcredsfile):
@@ -46,10 +89,9 @@ class VenueTableGetter:
 			raise KeyError(f'SQL Credentials are incomplete! The following keys are missing: '
 				f'{", ".join([k for k in sql_keys_required - set(sql_creds)])}')
 
-		# generate a Session object
-		self._SESSION = sessionmaker(autocommit=True)
+		# generate a Session object	
 		self._ENGINE = sqlalchemy.create_engine(f'mssql+pymssql://{sql_creds["user"]}:{sql_creds["user_pwd"]}@{sql_creds["server"]}:{sql_creds["port"]}/{sql_creds["db_name"]}')
-		self._SESSION.configure(bind=self._ENGINE)
+		self._SESSION = sessionmaker(autocommit=True, bind=self._ENGINE)
 		# create a session
 		self.sess = self._SESSION()
 
@@ -90,11 +132,11 @@ class VenueTableGetter:
 			if not self.exists(tbl):
 				raise Exception(f'table {tbl} doesn\'t exist!')
 			else:
-				print(f'table {tbl} exists and has {self.count_rows(tbl)} rows...')
+				print(f'table {tbl} has {self.count_rows(tbl):,} rows...')
 
 		
 
-		venues_ = pd.read_sql(f"""
+		self.venues_ = pd.read_sql(f"""
 								SELECT venues.*,
 									   ven_details.vcName, ven_details.paAddressLine1, ven_details.paAddressLine2, 
 									   ven_details.vcRegionName
@@ -109,77 +151,40 @@ class VenueTableGetter:
 											
 								""", self._ENGINE)
 
-		print(f'collected venue information:')
-		print(f'{len(venues_)} rows')
-		print(f'there are {len(venues_.columns)} columns: {", ".join([c for c in venues_.columns])}')
+		print(f'venue information collected: {len(self.venues_):,} rows')
+		print(f'columns: {", ".join([c for c in self.venues_.columns])}')
 
-		return venues_
+		return self
 
-class VenueMatcher:
-	
+	def save(self, where=None):
 
-	VENUECODE_NOTEPAD = 'data/venue_codes.txt'
-	BACKLOG = 'data/backlog.csv'
+		file_ = os.path.join(self.STRUCT[where]['dir'], self.STRUCT[where]['file'])
 
-	# whenever there's no way to tell which state a venue may be in, we will go for a more popular state
-	PREFERRED_STATES = 'nsw vic qld wa act sa tas nt'.split()
-	
-	STATES = {'nsw': 'new south wales', 
-			  'act': 'australian capital territory', 
-			  'vic': 'victoria',
-			  'tas': 'tasmania',
-			  'wa': 'western australia',
-			  'nt': 'northern teritory',
-			  'sa': 'south australia',
-			  'qld': 'queensland'}
-	
-	# now another dictionary, full to abbreviated
-	STATES_ = {v: k for k, v in STATES.items()}
-	
-	SUBURBS = json.load(open('data/aus_suburbs_auspost_APR2017.json'))
+		if where == 'new_venues':
+			self.venues_.to_csv(file_, sep='\t', index=False, compression='gzip')
+			
+		elif where == 'backlog':
+			json.dump(self.venues_lst, open(file_, 'w'))
 
-	BAD_TYPES = set('political colloquial_area locality natural_feature'.split())
-	
-	# sometimes we'd like to pick the search resuts of a particular type only
-	ENFORCED_TYPES = {'winery': 'food', 'vineyard': 'food', 'zoo': 'zoo'}
+		print(f'saved {where} to {file_}')
+			
 
-	GOOGLE_REQUESTS = 0
-	MAX_GOOGLE_REQUESTS = 1000
-	
-	gmaps = googlemaps.Client(**json.load(open('credentials/google.json')))
-	
-	def __init__(self, venue_file=None, venue_df=None):
+		return self
 
-		# check the backlog first
-		print('checking the backlog...')
+	def select_new_venues(self):
+		"""
+		keep only venues with NEW pks, i.e. pks not yet processed
+		"""
+		
+		try: 
+			old_pks = {l.strip() for l in open(os.path.join(self.STRUCT['old_venues']['dir'], self.STRUCT['old_venues']['file'])).readlines() if l.strip()}
+			self.venues_ = self.venues_[~self.venues_['pk_venue_dim'].astype(str).isin(old_pks)]
+		except:
+			pass
 
-		if os.path.exists(VenueMatcher.BACKLOG):
+		print(f'there are {len(self.venues_):,} new venues...')
 
-			self.BACKLOG = pd.read_csv(VenueMatcher.BACKLOG)
-			print(f'found {len(self.BACKLOG)} venues..')
-
-		else:
-
-			self.BACKLOG = None
-			print('no backlog...')
-
-		self.PROCESSED_VENUES = [vcode.strip() for vcode in open(VenueMatcher.VENUECODE_NOTEPAD) if vcode.strip()]
-		print(f'venue codes processed so far: {len(self.PROCESSED_VENUES)}')
-
-		if (venue_file is not None) and (venue_df is None):
-			self.venue_df = pd.read_csv(venue_file)
-		elif (venue_file is None) and (venue_df is not None):
-			self.venue_df = venue_df
-		else:
-			raise Exception('[VenueMatcher] specify venue_file or venue_df (and not both)!')
-
-		print(f'rows in venue dataframe: {len(self.venue_df)}')
-
-		self.venue_df = self.venue_df[~self.venue_df['venue_name'].str.lower().str.strip().isin(self.PROCESSED_VENUES)].fillna('')
-
-		print(f'new rows in venue dataframe: {len(self.venue_df)}')
-
-		self.tkt_venues = []
+		return self
 	
 	def _find_state(self, st):
 		"""
@@ -190,7 +195,7 @@ class VenueMatcher:
 		
 		st_norm = self._normalize(st)
 		
-		for s in (set(VenueMatcher.STATES) | set(VenueMatcher.STATES_)):
+		for s in (set(self.STATES) | set(self.STATES_)):
 			try:
 				states_found.add(re.search(r'\b' + s + r'\b', st_norm).group(0))
 			except:
@@ -198,7 +203,7 @@ class VenueMatcher:
 				
 		if states_found: # note that these may be either the full or abbreviated state names
 			# return full state names to avoid rare ambiguities like WA (Australia) and WA (the US)
-			return {s if s not in VenueMatcher.STATES_ else VenueMatcher.STATES_[s] for s in states_found}
+			return {s if s not in self.STATES_ else self.STATES_[s] for s in states_found}
 		
 		return states_found
 	
@@ -218,9 +223,9 @@ class VenueMatcher:
 			l1_ = w[0]
 			
 			# if any suburb names start from this letter..
-			if l1_ in VenueMatcher.SUBURBS:
+			if l1_ in self.SUBURBS:
 			
-				for r in VenueMatcher.SUBURBS[l1_]:
+				for r in self.SUBURBS[l1_]:
 					
 					try:
 						suburbs_found.add((re.search(r'\b' + r['name'] + r'\b', ' '.join(words_[i:])).group(0), r['state']))
@@ -237,22 +242,28 @@ class VenueMatcher:
 
 		returns a list like 
 
-		[{'name': 'aravina winery', 'code': ['awy'], 'state_': ['tas', 'wa'], 'state': 'wa'}, 
-			{'name': 'ballandean estate winery', 'code': ['bew'], 'state_': ['qld', 'wa'], 'state': 'qld'},...
+		[{'pk_venue_dim': 1637, 
+			'name': 'convention centre', 
+				'code': ['acn'], 
+					'state': 'sa'},...
 
 		where 
-				'state' is the state we managed to find
+				'state' is the state we managed to find;
+
+		we could have here something like 'state_': ['wa', 'tas'] where
 				'state_' are the candidate states we still keep just in case 
 		"""
 		
-		print('figuring out venue states..')
+		print('searching for venue states..')
 
-		for i, row in enumerate(self.venue_df.iterrows(),1):
+		for i, row in enumerate(self.venues_.iloc[:40].iterrows(),1):
 			
-			print(f'venue {i}...')
+			if i%20 == 0:
+				print(f'processing venue {i}...')
 				
 			this_venue = defaultdict()
-		
+			
+			this_venue['pk_venue_dim'] = row[1]['pk_venue_dim']
 			this_venue['name'] = self._normalize(row[1]['venue_desc'])
 			this_venue['code'] = [row[1]['venue_name'].lower()]
 			
@@ -261,7 +272,7 @@ class VenueMatcher:
 			
 			for c in ['venue_desc', 'vcRegionName','venue_region_desc']:
 				
-				# note: set below may be empty if no states found
+				# note: set below may be empty if no self.STATES found
 				candidate_states = self._find_state(self._normalize(row[1][c]))
 				
 				if len(candidate_states) == 1:
@@ -269,7 +280,7 @@ class VenueMatcher:
 					this_venue['state'] = candidate_states.pop()
 					break
 				else: 
-					# many or no candidate states; need to find suburb 
+					# many or no candidate self.STATES; need to find suburb 
 					for c in ['venue_desc', 'venue_region_desc']:
 						
 						# note that sub_state may be an empty set
@@ -279,11 +290,11 @@ class VenueMatcher:
 						if len(suburb_state_tuples) == 1:
 							
 							if len(candidate_states) > 0:
-								#  enough if its state is among candidate states
+								#  enough if its state is among candidate self.STATES
 								if list(suburb_state_tuples)[0][1] in candidate_states:
 									this_venue['state'] = list(suburb_state_tuples)[0][1]
 							else:
-								# if no candidate states
+								# if no candidate self.STATES
 								this_venue['state'] = list(suburb_state_tuples)[0][1]
 								
 							break
@@ -291,10 +302,10 @@ class VenueMatcher:
 						# what if more than one suburb found?
 						elif len(suburb_state_tuples) > 1:
 							
-							# suppose no candidate states
+							# suppose no candidate self.STATES
 							if not candidate_states:
 								
-								# if different suburbs in THE SAME state
+								# if different self.SUBURBS in THE SAME state
 								_ = {s[1] for s in suburb_state_tuples}
 								
 								if len(_) == 1:
@@ -308,18 +319,18 @@ class VenueMatcher:
 									if len(longest_sub[0].split()) > 1:
 										this_venue['state'] = longest_sub[1]
 									else:
-										# simply add a list of candidate states
+										# simply add a list of candidate self.STATES
 										this_venue['state_'] = list(_)
 									break
 							else:
-								# if we have multiple candidate states AND multiple suburbs
+								# if we have multiple candidate self.STATES AND multiple self.SUBURBS
 								for ss in suburb_state_tuples:
 									# pick the first suburb that has its state among state candidates
 									if ss[1] in candidate_states:
 										this_venue['state'] = ss[1]
 										break
 										
-			self.tkt_venues.append(this_venue)
+			self.venues_lst.append(this_venue)
 		
 		return self
 	
@@ -329,13 +340,13 @@ class VenueMatcher:
 		"""
 		print('merging venue codes...')
 
-		before_ = len(self.tkt_venues)
+		before_ = len(self.venues_lst)
 
 		venues_ = []
 		# venue names already processed
 		nms = set()
 		
-		for v in self.tkt_venues:
+		for v in self.venues_lst:
 			
 			if v[on] not in nms:
 				venues_.append(v)
@@ -347,9 +358,9 @@ class VenueMatcher:
 						v_['code'].extend(v['code'])
 						v_['code'] = list(set(v_['code']))
 						
-		self.tkt_venues = venues_
+		self.venues_lst = venues_
 
-		after_ = len(self.tkt_venues)
+		after_ = len(self.venues_lst)
 
 		print(f'now have {after_} distinct venues' + ('' if before_ - after_ == 0 else f' ({after_ - before_})'))
 			
@@ -359,6 +370,9 @@ class VenueMatcher:
 		"""
 		normalize a string st
 		"""
+		if not isinstance(st, str):
+			return ''
+
 		st = st.lower()
 		# replace separators with white spaces
 		st = re.sub(r'[-/_.]', ' ', st)
@@ -378,22 +392,33 @@ class VenueMatcher:
 								  'coordinates': res['geometry']['location']}
 		return up
 		
-	def get_place_id(self, local_file=None):
+	def get_place_id(self):
 		
 		"""
 		ask Google maps to find places by name; the key here is to hopefully
 		grab a place id
 		"""
-		
-		print('retrieving place ids...')
-		
-		if local_file:
-			
-			self.tkt_venues = json.load(open(local_file))
-			print(f'collected {len(self.tkt_venues)} venues from the locally saved file {local_file}')
-			print(f'{sum(["place_id" in v for v in self.tkt_venues])} of these already have place_ids')
+		# grab whatever is in the backlog if anything..
 
-		for i, v in enumerate(self.tkt_venues,1):
+		try:
+
+			pks = {_['pk_venue_dim'] for _ in self.venues_lst}
+
+			bl_ = [r for r in json.load(open(os.path.join(self.STRUCT['backlog']['dir'], self.STRUCT['backlog']['file']))) 
+											if ('place_id' not in r) and (r['pk_venue_dim'] not in pks)]
+
+			print(f'adding {len(bl_)} backlogged venues...')
+
+			self.venues_lst.extend(bl_)
+
+			print(f'now have {len(self.venues_lst)} venues to process...')
+			
+		except:
+			pass
+
+		print('retrieving place ids...')
+
+		for i, v in enumerate(self.venues_lst, 1):
 			
 			# we want to query Google Maps for the venues that don't have a place_id yet
 			
@@ -405,12 +430,11 @@ class VenueMatcher:
 				
 					# so we have a specific state..
 					try:
-						qr_ = self.gmaps.geocode(' '.join([v['name'], VenueMatcher.STATES[v['state']], 'australia']))
-						VenueMatcher.GOOGLE_REQUESTS += 1
-						print(f'requests: {VenueMatcher.GOOGLE_REQUESTS}')
+						qr_ = self.gmaps.geocode(' '.join([v['name'], self.STATES[v['state']], 'australia']))
+						self.GOOGLE_REQUESTS += 1
 					except:
-						print(f'no response! probably exceeded quota?')
-						json.dump(self.tkt_venues, open('data/tkt_venues.json','w'))
+						print(f'exceeded quota?')
+						self.save('backlog')
 						break
 				
 					if qr_:
@@ -423,12 +447,11 @@ class VenueMatcher:
 					for possible_state in v['state_']:
 						
 						try:
-							qr_ = self.gmaps.geocode(' '.join([v['name'], VenueMatcher.STATES[possible_state], 'australia']))
-							VenueMatcher.GOOGLE_REQUESTS += 1
-							print(f'requests: {VenueMatcher.GOOGLE_REQUESTS}')
+							qr_ = self.gmaps.geocode(' '.join([v['name'], self.STATES[possible_state], 'australia']))
+							self.GOOGLE_REQUESTS += 1
 						except:
-							print(f'no response, probably EXCEEDED GOOGLE API QUOTA?')
-							json.dump(vm.tkt_venues, open('data/tkt_venuesx.json','w'))
+							print(f'exceeded quota?')
+							self.save('backlog')
 							break
 					
 						if qr_:
@@ -437,7 +460,7 @@ class VenueMatcher:
 							
 							for r in qr_:
 
-								if VenueMatcher.BAD_TYPES & set(r.get('types',[])):
+								if self.BAD_TYPES & set(r.get('types',[])):
 									continue
 								else:
 									q_top_result = r
@@ -459,25 +482,26 @@ class VenueMatcher:
 
 										pass
 		
-		json.dump(self.tkt_venues, open('data/tkt_venuesx.json','w'))
+		print('completed..')
+		self.save('backlog')
 		
 		return self
 	
 	def get_place_details(self, local_file=None):
 		
 		"""
-		ask google maps for place details using a place id; 
+		ask Google maps for place details using a place id; 
 		"""
 		
-		print('retirieving place details...')
+		print('retrieving place details...')
 		
 		if local_file:
 			
-			self.tkt_venues = json.load(open(local_file))
-			print(f'collected {len(self.tkt_venues)} venues from the locally saved file {local_file}')
-			print(f'{sum(["name_googlemaps" in v for v in self.tkt_venues])} of these have googlemaps name')
+			self.venues_lst = json.load(open(local_file))
+			print(f'collected {len(self.venues_lst)} venues from the locally saved file {local_file}')
+			print(f'{sum(["name_googlemaps" in v for v in self.venues_lst])} of these have googlemaps name')
 		
-		for i, v in enumerate(self.tkt_venues, 1):
+		for i, v in enumerate(self.venues_lst, 1):
 			
 			if i%100 == 0:
 				print(f'venue {i}: {v["name"].upper()}...')
@@ -485,12 +509,12 @@ class VenueMatcher:
 			if ('place_id' in v) and ('name_googlemaps' not in v):     
 				
 				try:
-					place_details = self.gmaps.place(v['place_id'])['result']
-					VenueMatcher.GOOGLE_REQUESTS += 1
-					print(f'requests: {VenueMatcher.GOOGLE_REQUESTS}')
+					place_details = self.self.gmaps.place(v['place_id'])['result']
+					VenueMatcher.self.GOOGLE_REQUESTS += 1
+					print(f'requests: {VenueMatcher.self.GOOGLE_REQUESTS}')
 				except:
 					print(f'can\'t get any place details for place_id {v["name"]}. EXCEEDED QUOTA?')
-					json.dump(self.tkt_venues, open('data/tkt_venues.json','w'))
+					json.dump(self.venues_lst, open('data/tkt_venues.json','w'))
 					return self                
 					  
 				try:
@@ -519,7 +543,7 @@ class VenueMatcher:
 					 print(f'no website found!') 
 		
 		
-		json.dump(self.tkt_venues, open('data/tkt_venues.json','w'))
+		json.dump(self.venues_lst, open('data/tkt_venues.json','w'))
 		
 		return self
 	
@@ -532,9 +556,9 @@ class VenueMatcher:
 		
 		vs_ = [] 
 		
-		for v in self.tkt_venues:
+		for v in self.venues_lst:
 			
-			if set(v.get("venue_type", [])) & VenueMatcher.BAD_TYPES:
+			if set(v.get("venue_type", [])) & VenueMatcher.self.BAD_TYPES:
 				
 				if 'name' not in v:
 					continue
@@ -553,9 +577,9 @@ class VenueMatcher:
 			else:
 				vs_.append(v)
 				
-		self.tkt_venues = vs_
+		self.venues_lst = vs_
 		
-		json.dump(self.tkt_venues, open('data/tkt_venues.json','w'))
+		json.dump(self.venues_lst, open('data/tkt_venues.json','w'))
 		
 		print(f'flagged venues: {len(VenueMatcher.SUSPICIOUS_VENUES)}')
 		
@@ -565,7 +589,7 @@ class VenueMatcher:
 		
 		good_ = set()
 		
-		for v in self.tkt_venues:
+		for v in self.venues_lst:
 			if 'place_id' in v:
 				good_.add(v['name'])
 		
@@ -575,33 +599,37 @@ class VenueMatcher:
 
 if __name__ == '__main__':
 
-	vtg = VenueTableGetter()
+	vm = VenueMatcher() \
+		.start_session('config/rds.txt') \
+		.check().get_venues() \
+		.close_session() \
+		.save('new_venues') \
+		.select_new_venues() \
+		.find_venue_state() \
+		.merge_codes() \
+		.save('backlog') \
+		.get_place_id()
 
-	vtg.start_session('config/rds.txt')
 
-	venue_df = vtg.get_venues()
+	# print('unpickling model..')
 
-	vtg.close_session()
+	# model = pickle.load(open('badvenue.pkl', 'rb'))
 
-	print('unpickling model..')
+	# venue_df['is_ok'] = model.predict(venue_df['venue_desc'])
 
-	model = pickle.load(open('badvenue.pkl', 'rb'))
+	# save(venue_df)
 
-	venue_df['is_ok'] = model.predict(venue_df['venue_desc'])
+	# print(venue_df.head())
 
-	save(venue_df)
+	# vm = VenueMatcher(venue_df=venue_df)
 
-	print(venue_df.head())
+	# vm.find_venue_state()
 
-	vm = VenueMatcher(venue_df=venue_df)
+	# vm.merge_codes()
 
-	vm.find_venue_state()
+	# vm.get_place_id()
 
-	vm.merge_codes()
-
-	vm.get_place_id()
-
-	print(vm.tkt_venues)
+	# print(vm.tkt_venues)
 
 
 
