@@ -5,8 +5,6 @@ import pandas as pd
 import sqlalchemy
 from sqlalchemy.orm.session import sessionmaker
 
-# import pandas as pd
-# import json
 import re
 import os
 from pprint import pprint
@@ -30,7 +28,9 @@ class VenueMatcher:
 
 		self.STRUCT = {'backlog': {'dir': 'backlog', 'file': 'backlog.json'},
 						'new_venues': {'dir': 'new_venues', 'file': 'new_venues.csv.gz'},
-						'old_venues': {'dir': 'old_venues', 'file': 'processed_venue_codes.txt'}} 
+						'old_venues': {'dir': 'old_venues', 'file': 'processed_venue_codes.txt'},
+						'processed_venues': {'dir': 'processed_venues', 'file': 'processed_venues.json'},
+						'model': {'dir': 'model', 'file': 'badvenue.pkl'}} 
 
 		self.PREFERRED_STATES = 'nsw vic qld wa act sa tas nt'.split()
 	
@@ -60,6 +60,8 @@ class VenueMatcher:
 
 		self.venues_lst = []
 
+		self.SUSPICIOUS_VENUES = set()
+
 	def check(self):
 
 		for what in self.STRUCT:
@@ -76,6 +78,18 @@ class VenueMatcher:
 
 		return self
 
+	def predict_baddies(self):
+
+		print(os.path.join(self.STRUCT['model']['dir'], self.STRUCT['model']['file']))
+
+		try:
+			model = pickle.load(open(os.path.join(self.STRUCT['model']['dir'], self.STRUCT['model']['file']), 'rb'))
+		except:
+			raise IOError('[predict_baddies]: can\'t unpickle the model!')
+		
+		self.venues_['is_ok'] = model.predict(self.venues_['venue_desc'])
+
+		return self
 
 	def start_session(self, sqlcredsfile):
 
@@ -164,6 +178,9 @@ class VenueMatcher:
 			self.venues_.to_csv(file_, sep='\t', index=False, compression='gzip')
 			
 		elif where == 'backlog':
+			json.dump(self.venues_lst, open(file_, 'w'))
+
+		elif where == 'processed_venues':
 			json.dump(self.venues_lst, open(file_, 'w'))
 
 		print(f'saved {where} to {file_}')
@@ -391,6 +408,22 @@ class VenueMatcher:
 								  'venue_type': res.get('types', None),
 								  'coordinates': res['geometry']['location']}
 		return up
+
+	def _add_backlog(self):
+
+		try:
+			bl_ = json.load(open(os.path.join(self.STRUCT['backlog']['dir'], self.STRUCT['backlog']['file']))) 
+		except:
+			print('nothing to add from backlog.. ')
+			return self
+
+		pks = {_['pk_venue_dim'] for _ in self.venues_lst}
+
+		self.venues_lst.extend([_ for _ in bl_ if _['pk_venue_dim'] not in pks])
+
+		print(f'now have {len(self.venues_lst)} venues to process...')
+
+		return self
 		
 	def get_place_id(self):
 		
@@ -400,21 +433,7 @@ class VenueMatcher:
 		"""
 		# grab whatever is in the backlog if anything..
 
-		try:
-
-			pks = {_['pk_venue_dim'] for _ in self.venues_lst}
-
-			bl_ = [r for r in json.load(open(os.path.join(self.STRUCT['backlog']['dir'], self.STRUCT['backlog']['file']))) 
-											if ('place_id' not in r) and (r['pk_venue_dim'] not in pks)]
-
-			print(f'adding {len(bl_)} backlogged venues...')
-
-			self.venues_lst.extend(bl_)
-
-			print(f'now have {len(self.venues_lst)} venues to process...')
-			
-		except:
-			pass
+		self._add_backlog()
 
 		print('retrieving place ids...')
 
@@ -431,6 +450,7 @@ class VenueMatcher:
 					# so we have a specific state..
 					try:
 						qr_ = self.gmaps.geocode(' '.join([v['name'], self.STATES[v['state']], 'australia']))
+
 						self.GOOGLE_REQUESTS += 1
 					except:
 						print(f'exceeded quota?')
@@ -487,19 +507,15 @@ class VenueMatcher:
 		
 		return self
 	
-	def get_place_details(self, local_file=None):
+	def get_place_details(self):
 		
 		"""
 		ask Google maps for place details using a place id; 
 		"""
+
+		self._add_backlog()
 		
 		print('retrieving place details...')
-		
-		if local_file:
-			
-			self.venues_lst = json.load(open(local_file))
-			print(f'collected {len(self.venues_lst)} venues from the locally saved file {local_file}')
-			print(f'{sum(["name_googlemaps" in v for v in self.venues_lst])} of these have googlemaps name')
 		
 		for i, v in enumerate(self.venues_lst, 1):
 			
@@ -509,12 +525,11 @@ class VenueMatcher:
 			if ('place_id' in v) and ('name_googlemaps' not in v):     
 				
 				try:
-					place_details = self.self.gmaps.place(v['place_id'])['result']
-					VenueMatcher.self.GOOGLE_REQUESTS += 1
-					print(f'requests: {VenueMatcher.self.GOOGLE_REQUESTS}')
+					place_details = self.gmaps.place(v['place_id'])['result']
+					self.GOOGLE_REQUESTS += 1
 				except:
-					print(f'can\'t get any place details for place_id {v["name"]}. EXCEEDED QUOTA?')
-					json.dump(self.venues_lst, open('data/tkt_venues.json','w'))
+					print(f'exceeded quota?')
+					self.save('backlog')
 					return self                
 					  
 				try:
@@ -543,72 +558,26 @@ class VenueMatcher:
 					 print(f'no website found!') 
 		
 		
-		json.dump(self.venues_lst, open('data/tkt_venues.json','w'))
+		print('completed..')
+		self.save('processed_venues')
 		
 		return self
 	
-	def clear_suspects(self):
-		"""
-		remove all fields but name, code and state/state candidates for dubious venues
-		"""
-		
-		print('looking for suspicious venues..')
-		
-		vs_ = [] 
-		
-		for v in self.venues_lst:
-			
-			if set(v.get("venue_type", [])) & VenueMatcher.self.BAD_TYPES:
-				
-				if 'name' not in v:
-					continue
-				
-				fields_ = {'name': v['name'],
-						   'code': v['code']}
-				if 'state' in v:
-					fields_.update({'state': v['state']})
-				if 'state_' in v:
-					fields_.update({'state_': v['state_']})
-					
-				vs_.append(fields_)
-				
-				VenueMatcher.SUSPICIOUS_VENUES.add(v['name'])
-				
-			else:
-				vs_.append(v)
-				
-		self.venues_lst = vs_
-		
-		json.dump(self.venues_lst, open('data/tkt_venues.json','w'))
-		
-		print(f'flagged venues: {len(VenueMatcher.SUSPICIOUS_VENUES)}')
-		
-		return self
 	
-	def create_dataset(self):
-		
-		good_ = set()
-		
-		for v in self.venues_lst:
-			if 'place_id' in v:
-				good_.add(v['name'])
-		
-		pd.DataFrame(pd.concat([pd.DataFrame({'venue': list(good_), 'is_ok': [1]*len(good_)}),
-							   pd.DataFrame({'venue': list(VenueMatcher.SUSPICIOUS_VENUES), 'is_ok': [0]*len(VenueMatcher.SUSPICIOUS_VENUES)})])).sample(frac=1.).to_csv('venue_db.csv', index=False)
-				
-
 if __name__ == '__main__':
 
 	vm = VenueMatcher() \
 		.start_session('config/rds.txt') \
 		.check().get_venues() \
 		.close_session() \
+		.predict_baddies() \
 		.save('new_venues') \
 		.select_new_venues() \
 		.find_venue_state() \
 		.merge_codes() \
 		.save('backlog') \
-		.get_place_id()
+		.get_place_id() \
+		.get_place_details()
 
 
 	# print('unpickling model..')
