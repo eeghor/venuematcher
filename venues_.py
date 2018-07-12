@@ -56,7 +56,7 @@ class VenueMatcher:
 		self.GOOGLE_REQUESTS = 0
 		self.MAX_GOOGLE_REQUESTS = 1000
 		
-		self.gmaps = googlemaps.Client(**json.load(open('credentials/google.json')))	
+		self.gmaps = googlemaps.Client(**json.load(open('config/google.json')))	
 
 		self.venues_lst = []
 
@@ -66,28 +66,33 @@ class VenueMatcher:
 
 		for what in self.STRUCT:
 
-			print(f'checking for {what}...')
+			print(f'checking for {what}...', end='')
 
 			if not os.path.exists(self.STRUCT[what]['dir']):
 				os.mkdir(self.STRUCT[what]['dir'])
 
 			if not os.path.exists(os.path.join(self.STRUCT[what]['dir'], self.STRUCT[what]['file'])):
-				print(f'no {what} found...')
+				print(f'failed')
 			else:
-				print(f'found some {what}...')
+				print(f'ok')
 
 		return self
 
 	def predict_baddies(self):
 
-		print(os.path.join(self.STRUCT['model']['dir'], self.STRUCT['model']['file']))
 
-		try:
-			model = pickle.load(open(os.path.join(self.STRUCT['model']['dir'], self.STRUCT['model']['file']), 'rb'))
-		except:
-			raise IOError('[predict_baddies]: can\'t unpickle the model!')
-		
-		self.venues_['is_ok'] = model.predict(self.venues_['venue_desc'])
+		if self.venues_.empty:
+
+			print('[predict_baddies]: doing nothing because data frame is empty - there are no new venues!')
+
+		else:
+
+			try:
+				model = pickle.load(open(os.path.join(self.STRUCT['model']['dir'], self.STRUCT['model']['file']), 'rb'))
+			except:
+				raise IOError('[predict_baddies]: can\'t unpickle the model!')
+			
+			self.venues_['is_ok'] = model.predict(self.venues_['venue_desc'])
 
 		return self
 
@@ -149,6 +154,7 @@ class VenueMatcher:
 				print(f'table {tbl} has {self.count_rows(tbl):,} rows...')
 
 		
+		# note: all columns will be strings here:
 
 		self.venues_ = pd.read_sql(f"""
 								SELECT venues.*,
@@ -156,7 +162,7 @@ class VenueMatcher:
 									   ven_details.vcRegionName
 								FROM
 									(SELECT pk_venue_dim, venue_name, venue_desc, venue_region_desc
-									 FROM {self.VENUE_BASE_TBL} WHERE venue_name like '[a-Z][a-Z][a-Z]') venues
+									 FROM {self.VENUE_BASE_TBL} WHERE ((venue_name like '[a-Z][a-Z][a-Z]') AND (pk_venue_dim IS NOT NULL))) venues
 									 LEFT JOIN
 									(SELECT venue_name, vcName, paAddressLine1, paAddressLine2, vcRegionName
 									 FROM {self.VENUE_EXTRA_TBL} WHERE venue_name like '[a-Z][a-Z][a-Z]') ven_details
@@ -165,8 +171,10 @@ class VenueMatcher:
 											
 								""", self._ENGINE)
 
+		# convert pks to int
+		self.venues_['pk_venue_dim'] = self.venues_['pk_venue_dim'].astype(int)
+
 		print(f'venue information collected: {len(self.venues_):,} rows')
-		print(f'columns: {", ".join([c for c in self.venues_.columns])}')
 
 		return self
 
@@ -192,14 +200,21 @@ class VenueMatcher:
 		"""
 		keep only venues with NEW pks, i.e. pks not yet processed
 		"""
-		
+		print('selecting new venues...', end='')
+
 		try: 
-			old_pks = {l.strip() for l in open(os.path.join(self.STRUCT['old_venues']['dir'], self.STRUCT['old_venues']['file'])).readlines() if l.strip()}
-			self.venues_ = self.venues_[~self.venues_['pk_venue_dim'].astype(str).isin(old_pks)]
+			old_pks = {int(l.strip()) for l in open(os.path.join(self.STRUCT['old_venues']['dir'], self.STRUCT['old_venues']['file'])).readlines() if l.strip()}
+			self.venues_ = self.venues_[~self.venues_['pk_venue_dim'].isin(old_pks)]
 		except:
 			pass
 
-		print(f'there are {len(self.venues_):,} new venues...')
+		try:
+			bcklg_pks = {_['pk_venue_dim'] for _ in json.load(open(os.path.join(self.STRUCT['backlog']['dir'], self.STRUCT['backlog']['file'])))}
+			self.venues_ = self.venues_[~self.venues_['pk_venue_dim'].isin(bcklg_pks)]
+		except:
+			pass
+
+		print(f'{len(self.venues_):,}')
 
 		return self
 	
@@ -273,7 +288,12 @@ class VenueMatcher:
 		
 		print('searching for venue states..')
 
-		for i, row in enumerate(self.venues_.iloc[:40].iterrows(),1):
+		if self.venues_.empty:
+
+			print('[find_venue_state]: skipping this step as there are no new venues!')
+			return self
+
+		for i, row in enumerate(self.venues_.iloc[:15].iterrows(),1):
 			
 			if i%20 == 0:
 				print(f'processing venue {i}...')
@@ -357,6 +377,10 @@ class VenueMatcher:
 		"""
 		print('merging venue codes...')
 
+		if self.venues_.empty:
+			print('[merge_codes]: skipping this step as there are no new venues!')
+			return self
+
 		before_ = len(self.venues_lst)
 
 		venues_ = []
@@ -379,7 +403,7 @@ class VenueMatcher:
 
 		after_ = len(self.venues_lst)
 
-		print(f'now have {after_} distinct venues' + ('' if before_ - after_ == 0 else f' ({after_ - before_})'))
+		print(f'distinct venues: {after_}' + ('' if before_ - after_ == 0 else f' ({after_ - before_})'))
 			
 		return self 
 	
@@ -411,17 +435,17 @@ class VenueMatcher:
 
 	def _add_backlog(self):
 
+		print('adding venues from backlog...')
+
 		try:
 			bl_ = json.load(open(os.path.join(self.STRUCT['backlog']['dir'], self.STRUCT['backlog']['file']))) 
+			# pks in the new venues
+			pks = {_['pk_venue_dim'] for _ in self.venues_lst}
+			# add from backlog only those venues whose pks are not in the new pones
+			self.venues_lst.extend([_ for _ in bl_ if _['pk_venue_dim'] not in pks])
+			print(f'{len(self.venues_lst)} venues to process...')
 		except:
 			print('nothing to add from backlog.. ')
-			return self
-
-		pks = {_['pk_venue_dim'] for _ in self.venues_lst}
-
-		self.venues_lst.extend([_ for _ in bl_ if _['pk_venue_dim'] not in pks])
-
-		print(f'now have {len(self.venues_lst)} venues to process...')
 
 		return self
 		
@@ -568,37 +592,13 @@ if __name__ == '__main__':
 
 	vm = VenueMatcher() \
 		.start_session('config/rds.txt') \
-		.check().get_venues() \
+		.check() \
+		.get_venues() \
 		.close_session() \
+		.select_new_venues() \
 		.predict_baddies() \
 		.save('new_venues') \
-		.select_new_venues() \
 		.find_venue_state() \
 		.merge_codes() \
-		.save('backlog') \
 		.get_place_id() \
 		.get_place_details()
-
-
-	# print('unpickling model..')
-
-	# model = pickle.load(open('badvenue.pkl', 'rb'))
-
-	# venue_df['is_ok'] = model.predict(venue_df['venue_desc'])
-
-	# save(venue_df)
-
-	# print(venue_df.head())
-
-	# vm = VenueMatcher(venue_df=venue_df)
-
-	# vm.find_venue_state()
-
-	# vm.merge_codes()
-
-	# vm.get_place_id()
-
-	# print(vm.tkt_venues)
-
-
-
