@@ -186,9 +186,28 @@ class VenueMatcher:
 			self.venues_.to_csv(file_, sep='\t', index=False, compression='gzip')
 			
 		elif where == 'backlog':
-			json.dump(self.venues_lst, open(file_, 'w'))
+
+			venues_compl = []
+			venues_incompl = []
+
+			for _ in self.venues_lst:
+				if ('place_id' in _) and ('name_googlemaps' in _):
+					venues_compl.append(_)
+				else:
+					venues_incompl.append(_)
+
+			with open(os.path.join(self.STRUCT['old_venues']['dir'], self.STRUCT['old_venues']['file']), 'a') as f:
+				for c in [_['pk_venue_dim'] for _ in venues_compl]:
+					f.write(f'{c}\n')
+
+			json.dump(venues_incompl, open(file_, 'w'))
 
 		elif where == 'processed_venues':
+
+			with open(os.path.join(self.STRUCT['old_venues']['dir'], self.STRUCT['old_venues']['file']), 'a') as f:
+				for c in [_['pk_venue_dim'] for _ in self.venues_lst]:
+					f.write(f'{c}\n')
+					
 			json.dump(self.venues_lst, open(file_, 'w'))
 
 		print(f'saved {where} to {file_}')
@@ -553,7 +572,7 @@ class VenueMatcher:
 					self.GOOGLE_REQUESTS += 1
 				except:
 					print(f'exceeded quota?')
-					self.save('backlog')
+					self.split_and_save()
 					return self                
 					  
 				try:
@@ -586,7 +605,7 @@ class VenueMatcher:
 		self.save('processed_venues')
 		
 		return self
-	
+
 	
 if __name__ == '__main__':
 
